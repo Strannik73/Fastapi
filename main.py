@@ -80,6 +80,8 @@ def post_login(request: Request,
             }
             response = RedirectResponse(url="/main", status_code=303)
             response.set_cookie(key="session_id", value=session_id, httponly=True)
+            response.set_cookie(key="username", value=username, httponly=True)
+            response.set_cookie(key="role", value=user_role, httponly=True)
             return response
 
         return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный пароль"})
@@ -125,6 +127,8 @@ def post_register(request: Request,
     }
     response = RedirectResponse(url="/main", status_code=303)
     response.set_cookie(key="session_id", value=session_id, httponly=True)
+    response.set_cookie(key="username", value=username, httponly=True)
+    response.set_cookie(key="role", value=role, httponly=True)
     return response
 
 @app.get("/main", response_class=HTMLResponse)
