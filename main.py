@@ -1,3 +1,4 @@
+# uvicorn main:app --reload                  (запуск )
 from datetime import datetime, timedelta
 import uuid
 import pandas as pd
@@ -14,14 +15,14 @@ templates = Jinja2Templates(directory="templates")
 USERS = "users.csv"
 SESSION_TTL = timedelta(days=10)
 sessions = {}
-white_urls = ["/", "/login", "/logout", "/register"]  # /main убрал
+white_urls = ["/", "/login", "/logout", "/register"]  
 
 def hash_password(password) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
 
 df = pd.read_csv("users.csv")
 
-# если есть колонка "password", пересчитаем в hash
+
 if "password" in df.columns:
     df["password_hash"] = df["password"].apply(hash_password)
     df = df.drop(columns=["password"])
@@ -66,16 +67,17 @@ def post_login(request: Request,
         users["role"] = "user"
 
     if username in users["users"].values:
-        stored_hash = users.loc[users["users"] == username, "password_hash"].values[0]
+        hash = users.loc[users["users"] == username, "password_hash"].values[0]
         user_role = users.loc[users["users"] == username, "role"].values[0]
 
-        if stored_hash == hash_password(password):
+        if hash == hash_password(password):
             session_id = str(uuid.uuid4())
             sessions[session_id] = {
                 "created": datetime.now(),
                 "username": username,
                 "avatar": "static/avatars/default.png",
-                "password_hash": stored_hash,
+                "password_hash": hash,
+                "password": password,
                 "role": user_role
             }
             response = RedirectResponse(url="/main", status_code=303)
@@ -123,6 +125,7 @@ def post_register(request: Request,
         "username": username,
         "avatar": "static/avatars/default.png",
         "password_hash": password_hash,
+        "password": password,
         "role": role
     }
     response = RedirectResponse(url="/main", status_code=303)
@@ -152,6 +155,11 @@ def logout(request: Request):
     if session_id:
         sessions.pop(session_id, None)
     return RedirectResponse(url="/login", status_code=303)
+
+# @app.post("/old")
+# async def redirect_after_update():
+#     # Здесь может быть ваша логика обновления данных
+#     return RedirectResponse(url="/login")
 
 @app.exception_handler(404)
 async def not_found(request: Request, exc):
