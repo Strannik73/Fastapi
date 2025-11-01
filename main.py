@@ -1,5 +1,6 @@
-# uvicorn main:app --reload                  (запуск )
+# python -m uvicorn main:app --host 0.0.0.0 --port 443 --ssl-keyfile=key.pem --ssl-certfile=cert.pem                  (запуск )
 from datetime import datetime, timedelta
+import os
 import uuid
 import pandas as pd
 from fastapi import FastAPI, Form, Request
@@ -13,9 +14,22 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 USERS = "users.csv"
+log = "log.csv"
 SESSION_TTL = timedelta(days=10)
 sessions = {}
 white_urls = ["/", "/login", "/logout", "/register"]  
+
+logdata = {'user': [], 'role': [], 'action': [], 'Date': [], 'Time': [], }
+if os.path.exists(log):
+    lg = pd.read_csv(log)
+    # Убедимся, что структура корректна
+    expected_columns = list(logdata.keys())
+    for col in expected_columns:
+        if col not in lg.columns:
+            lg[col] = None
+    lg = lg[expected_columns]
+else:
+    lg = pd.DataFrame(logdata)
 
 def hash_password(password) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
@@ -24,11 +38,11 @@ df = pd.read_csv("users.csv")
 
 
 if "password" in df.columns:
-    df["password_hash"] = df["password"].apply(hash_password)
-    df = df.drop(columns=["password"])
+    df["password_hash"] = df["password"].apply( hash_password)
+    # df = df.drop(columns=["password"])
 
 df.to_csv("users.csv", index=False)
-print("users.csv обновлён:", df.head())
+
 
 @app.middleware("http")
 async def check_session(request: Request, call_next):
@@ -48,6 +62,7 @@ async def check_session(request: Request, call_next):
     
     return await call_next(request)
 
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/login", response_class=HTMLResponse)
 def get_login_page(request: Request):
@@ -57,38 +72,43 @@ def get_login_page(request: Request):
 def post_login(request: Request, 
                username: str = Form(...), 
                password: str = Form(...)):
+    
     try:
         users = pd.read_csv(USERS)
         users = users.loc[:, ~users.columns.str.contains('^Unnamed')]
     except Exception:
-        users = pd.DataFrame(columns=["users", "password", "password_hash"])
+        users = pd.DataFrame(columns=["users", "password", "password_hash","role"])
 
     if "role" not in users.columns:
         users["role"] = "user"
 
     if username in users["users"].values:
-        hash = users.loc[users["users"] == username, "password_hash"].values[0]
-        user_role = users.loc[users["users"] == username, "role"].values[0]
+        password_hash = users.loc[users["users"] == username, "password_hash"].values[0]
+        role = users.loc[users["users"] == username, "role"].values[0]
 
-        if hash == hash_password(password):
+        if password_hash == hash_password(password):
             session_id = str(uuid.uuid4())
             sessions[session_id] = {
                 "created": datetime.now(),
                 "username": username,
                 "avatar": "static/avatars/default.png",
-                "password_hash": hash,
+                "password_hash": password_hash,
                 "password": password,
-                "role": user_role
+                "role": role
             }
             response = RedirectResponse(url="/main", status_code=303)
             response.set_cookie(key="session_id", value=session_id, httponly=True)
             response.set_cookie(key="username", value=username, httponly=True)
-            response.set_cookie(key="role", value=user_role, httponly=True)
-            return response
+            response.set_cookie(key="role", value=role, httponly=True)
 
+            lg.loc[len(lg.index)] = [username, role, "вход", datetime.now().date(), datetime.now().time()]
+            lg.to_csv('log.csv', index=True, index_label='№')
+            return response
+        
         return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный пароль"})
     
     return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин"})
+
 
 @app.get("/register", response_class=HTMLResponse)
 def get_register_page(request: Request):
@@ -98,6 +118,7 @@ def get_register_page(request: Request):
 def post_register(request: Request, 
                   username: str = Form(...), 
                   password: str = Form(...)):
+    
     try:
         users = pd.read_csv(USERS)
         users = users.loc[:, ~users.columns.str.contains('^Unnamed')]
@@ -113,7 +134,7 @@ def post_register(request: Request,
     password_hash = hash_password(password)
     role = "admin" if username == "admin" else "user"
     new_user = pd.DataFrame([{"users": username, 
-                              "password": password,
+                              "password": str(password),
                               "password_hash": password_hash,
                               "role": role}])
     users = pd.concat([users, new_user], ignore_index=True)
@@ -123,16 +144,19 @@ def post_register(request: Request,
     sessions[session_id] = {
         "created": datetime.now(),
         "username": username,
-        "avatar": "static/avatars/default.png",
-        "password_hash": password_hash,
         "password": password,
+        "password_hash": password_hash,
         "role": role
     }
     response = RedirectResponse(url="/main", status_code=303)
     response.set_cookie(key="session_id", value=session_id, httponly=True)
     response.set_cookie(key="username", value=username, httponly=True)
     response.set_cookie(key="role", value=role, httponly=True)
+
+    lg.loc[len(lg.index)] = [username, role, "регистрация", datetime.now().date(), datetime.now().time()]
+    lg.to_csv('log.csv', index=True, index_label='№')
     return response
+
 
 @app.get("/main", response_class=HTMLResponse)
 def main_page(request: Request):
@@ -143,8 +167,8 @@ def main_page(request: Request):
         if isinstance(session_data, dict):
             users = {
                 "username": session_data.get("username"),
-                "avatar": session_data.get("avatar", "static/avatars/default.png"),
                 "password_hash": session_data.get("password_hash", ""),
+                "password": session_data.get("username"),
                 "role": session_data.get("role", "user")
             }
     return templates.TemplateResponse("main.html", {"request": request, "user": users})
@@ -158,7 +182,6 @@ def logout(request: Request):
 
 # @app.post("/old")
 # async def redirect_after_update():
-#     # Здесь может быть ваша логика обновления данных
 #     return RedirectResponse(url="/login")
 
 @app.exception_handler(404)
@@ -169,3 +192,5 @@ async def not_found(request: Request, exc):
 @app.exception_handler(403)
 async def forbidden(request: Request, exc):
     return templates.TemplateResponse("403.html", {"request": request}, status_code=403)
+
+
