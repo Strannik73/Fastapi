@@ -12,19 +12,16 @@ KEY_FILE = "key.pem"
 CERT_FILE = "cert.pem"
 
 def generate_key_and_cert():
-    # Проверка наличия файлов
     if os.path.exists(KEY_FILE) and os.path.exists(CERT_FILE):
-        print("🔐 Ключ и сертификат уже существуют.")
+        print("Ключ и сертификат существуют")
         return
 
-    # Генерация приватного ключа
     key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
         backend=default_backend()
     )
 
-    # Сохранение приватного ключа
     with open(KEY_FILE, "wb") as f:
         f.write(key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -32,7 +29,6 @@ def generate_key_and_cert():
             encryption_algorithm=serialization.NoEncryption()
         ))
 
-    # Создание самоподписанного сертификата
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "BY"),
         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Minsk"),
@@ -54,11 +50,10 @@ def generate_key_and_cert():
         critical=False
     ).sign(key, hashes.SHA256(), default_backend())
 
-    # Сохранение сертификата
     with open(CERT_FILE, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-    print("✅ Ключ и сертификат успешно созданы.")
+    print("Ключ и сертификат созданы")
 
 if __name__ == "__main__":
     generate_key_and_cert()

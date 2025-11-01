@@ -22,7 +22,6 @@ white_urls = ["/", "/login", "/logout", "/register"]
 logdata = {'user': [], 'role': [], 'action': [], 'Date': [], 'Time': [], }
 if os.path.exists(log):
     lg = pd.read_csv(log)
-    # Убедимся, что структура корректна
     expected_columns = list(logdata.keys())
     for col in expected_columns:
         if col not in lg.columns:
@@ -180,7 +179,7 @@ def logout(request: Request):
         sessions.pop(session_id, None)
     return RedirectResponse(url="/login", status_code=303)
 
-# @app.post("/old")
+# @app.post("/")
 # async def redirect_after_update():
 #     return RedirectResponse(url="/login")
 
