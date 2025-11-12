@@ -112,13 +112,13 @@ def get_login(request: Request):
 def post_login(request: Request, username: str = Form(...), password: str = Form(...)):
     users = read_users()
     if username not in users["users"].values:
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин или пароль"})
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин "})
 
     row = users.loc[users["users"] == username].iloc[0]
     stored_hash = row.get("password_hash", "")
     role = row.get("role", "user")
     if stored_hash != hash_password(password):
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин или пароль"})
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный пароль"})
 
     session_id = str(uuid.uuid4())
     sessions[session_id] = {"created": datetime.now(), "username": username, "role": role}
