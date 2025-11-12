@@ -1,187 +1,189 @@
-# python -m uvicorn main:app --host 0.0.0.0 --port 443 --ssl-keyfile=key.pem --ssl-certfile=cert.pem                  (запуск )
-from datetime import datetime, timedelta
 import os
 import uuid
+import hashlib
+from datetime import datetime, timedelta
+from typing import Optional
+
 import pandas as pd
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import hashlib
+
+USERS_CSV = "users.csv"
+LOG_CSV = "log.csv"
+SESSION_TTL = timedelta(days=10)
+WHITE_URLS = {"/", "/login", "/register", "/logout", "/static"}
+DEV_MODE = os.getenv("DEV_MODE", "1") == "1" 
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-USERS = "users.csv"
-log = "log.csv"
-SESSION_TTL = timedelta(days=10)
-sessions = {}
-white_urls = ["/", "/login", "/logout", "/register"]  
-
-logdata = {'user': [], 'role': [], 'action': [], 'Date': [], 'Time': [], }
-if os.path.exists(log):
-    lg = pd.read_csv(log)
-    expected_columns = list(logdata.keys())
-    for col in expected_columns:
-        if col not in lg.columns:
-            lg[col] = None
-    lg = lg[expected_columns]
-else:
-    lg = pd.DataFrame(logdata)
-
-def hash_password(password) -> str:
-    return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
-
-df = pd.read_csv("users.csv")
+sessions: dict[str, dict] = {}
 
 
-if "password" in df.columns:
-    df["password_hash"] = df["password"].apply( hash_password)
-    # df = df.drop(columns=["password"])
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
-df.to_csv("users.csv", index=False)
+
+def ensure_users_file():
+    if not os.path.exists(USERS_CSV):
+        df = pd.DataFrame(columns=["users", "password_hash", "role"])
+        df.to_csv(USERS_CSV, index=False)
+
+
+def read_users() -> pd.DataFrame:
+    ensure_users_file()
+    try:
+        df = pd.read_csv(USERS_CSV)
+    except Exception:
+        df = pd.DataFrame(columns=["users", "password_hash", "role"])
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    if "users" not in df.columns:
+        df["users"] = []
+    if "password_hash" not in df.columns:
+        if "password" in df.columns:
+            df["password_hash"] = df["password"].astype(str).apply(hash_password)
+            df = df.drop(columns=["password"])
+        else:
+            df["password_hash"] = ""
+    if "role" not in df.columns:
+        df["role"] = "user"
+    return df
+
+
+def write_users(df: pd.DataFrame):
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    if "password" in df.columns:
+        df = df.drop(columns=["password"])
+    df.to_csv(USERS_CSV, index=False)
+
+
+def append_log(user: str, role: str, action: str):
+    entry = { "user": user, "role": role, "action": action, "Date": datetime.now().date().isoformat(), "Time": datetime.now().time().isoformat(timespec="seconds"),}
+    try:
+        if not os.path.exists(LOG_CSV):
+            pd.DataFrame([entry]).to_csv(LOG_CSV, index=False)
+        else:
+            lg = pd.read_csv(LOG_CSV)
+            lg = lg.loc[:, ~lg.columns.str.contains("^Unnamed")]
+            lg = pd.concat([lg, pd.DataFrame([entry])], ignore_index=True)
+            lg.to_csv(LOG_CSV, index=False)
+    except Exception:
+        pd.DataFrame([entry]).to_csv(LOG_CSV, index=False)
+
+
+ensure_users_file()
+if not os.path.exists(LOG_CSV):
+    pd.DataFrame(columns=["user", "role", "action", "Date", "Time"]).to_csv(LOG_CSV, index=False)
 
 
 @app.middleware("http")
-async def check_session(request: Request, call_next):
-    if request.url.path.startswith("/static") or request.url.path in white_urls:
+async def session_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/static") or path in WHITE_URLS:
         return await call_next(request)
-    
-    session_id = request.cookies.get("session_id")
-    session_data = sessions.get(session_id)
 
-    if not session_data:
+    session_id = request.cookies.get("session_id")
+    if not session_id:
         return RedirectResponse(url="/login")
-    
-    created = session_data.get("created")
-    if datetime.now() - created > SESSION_TTL:
+
+    session = sessions.get(session_id)
+    if not session:
+        return RedirectResponse(url="/login")
+
+    created: Optional[datetime] = session.get("created")
+    if not created or (datetime.now() - created) > SESSION_TTL:
         sessions.pop(session_id, None)
         return RedirectResponse(url="/login")
-    
+
+    session["created"] = datetime.now()
     return await call_next(request)
 
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/login", response_class=HTMLResponse)
-def get_login_page(request: Request):
+def get_login(request: Request):
     return templates.TemplateResponse("login.html", {"request": request})
 
+
 @app.post("/login")
-def post_login(request: Request, 
-               username: str = Form(...), 
-               password: str = Form(...)):
-    
-    try:
-        users = pd.read_csv(USERS)
-        users = users.loc[:, ~users.columns.str.contains('^Unnamed')]
-    except Exception:
-        users = pd.DataFrame(columns=["users", "password", "password_hash","role"])
+def post_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    users = read_users()
+    if username not in users["users"].values:
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин или пароль"})
 
-    if "role" not in users.columns:
-        users["role"] = "user"
+    row = users.loc[users["users"] == username].iloc[0]
+    stored_hash = row.get("password_hash", "")
+    role = row.get("role", "user")
+    if stored_hash != hash_password(password):
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин или пароль"})
 
-    if username in users["users"].values:
-        password_hash = users.loc[users["users"] == username, "password_hash"].values[0]
-        role = users.loc[users["users"] == username, "role"].values[0]
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = {"created": datetime.now(), "username": username, "role": role}
 
-        if password_hash == hash_password(password):
-            session_id = str(uuid.uuid4())
-            sessions[session_id] = {
-                "created": datetime.now(),
-                "username": username,
-                "avatar": "static/avatars/default.png",
-                "password_hash": password_hash,
-                "password": password,
-                "role": role
-            }
-            response = RedirectResponse(url="/main", status_code=303)
-            response.set_cookie(key="session_id", value=session_id, httponly=True)
-            response.set_cookie(key="username", value=username, httponly=True)
-            response.set_cookie(key="role", value=role, httponly=True)
+    response = RedirectResponse(url="/main", status_code=303)
+    secure_flag = False if DEV_MODE else True
+    response.set_cookie("session_id", session_id, httponly=True, secure=secure_flag, samesite="strict")
+    response.set_cookie("username", username, httponly=True, secure=secure_flag, samesite="strict")
+    response.set_cookie("role", role, httponly=True, secure=secure_flag, samesite="strict")
 
-            lg.loc[len(lg.index)] = [username, role, "вход", datetime.now().date(), datetime.now().time()]
-            lg.to_csv('log.csv', index=True, index_label='№')
-            return response
-        
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный пароль"})
-    
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Неверный логин"})
+    append_log(username, role, "login")
+    return response
 
 
 @app.get("/register", response_class=HTMLResponse)
-def get_register_page(request: Request):
+def get_register(request: Request):
     return templates.TemplateResponse("register.html", {"request": request})
 
+
 @app.post("/register")
-def post_register(request: Request, 
-                  username: str = Form(...), 
-                  password: str = Form(...)):
-    
-    try:
-        users = pd.read_csv(USERS)
-        users = users.loc[:, ~users.columns.str.contains('^Unnamed')]
-    except Exception:
-        users = pd.DataFrame(columns=["users", "password", "password_hash", "role"])
-
-    if "role" not in users.columns:
-        users["role"] = "user"
-
+def post_register(request: Request, username: str = Form(...), password: str = Form(...)):
+    users = read_users()
     if username in users["users"].values:
-        return templates.TemplateResponse("register.html", {"request": request, "error": "такой пользователь существует"})
-    
+        return templates.TemplateResponse("register.html", {"request": request, "error": "Пользователь уже существует"})
+
     password_hash = hash_password(password)
     role = "admin" if username == "admin" else "user"
-    new_user = pd.DataFrame([{"users": username, 
-                              "password": str(password),
-                              "password_hash": password_hash,
-                              "role": role}])
-    users = pd.concat([users, new_user], ignore_index=True)
-    users.to_csv(USERS, index=False)
+    new_row = {"users": username, "password_hash": password_hash, "role": role}
+    users = pd.concat([users, pd.DataFrame([new_row])], ignore_index=True)
+    write_users(users)
 
     session_id = str(uuid.uuid4())
-    sessions[session_id] = {
-        "created": datetime.now(),
-        "username": username,
-        "password": password,
-        "password_hash": password_hash,
-        "role": role
-    }
+    sessions[session_id] = {"created": datetime.now(), "username": username, "role": role}
     response = RedirectResponse(url="/main", status_code=303)
-    response.set_cookie(key="session_id", value=session_id, httponly=True)
-    response.set_cookie(key="username", value=username, httponly=True)
-    response.set_cookie(key="role", value=role, httponly=True)
+    secure_flag = False if DEV_MODE else True
+    response.set_cookie("session_id", session_id, httponly=True, secure=secure_flag, samesite="strict")
+    response.set_cookie("username", username, httponly=True, secure=secure_flag, samesite="strict")
+    response.set_cookie("role", role, httponly=True, secure=secure_flag, samesite="strict")
 
-    lg.loc[len(lg.index)] = [username, role, "регистрация", datetime.now().date(), datetime.now().time()]
-    lg.to_csv('log.csv', index=True, index_label='№')
+    append_log(username, role, "register")
     return response
 
 
 @app.get("/main", response_class=HTMLResponse)
-def main_page(request: Request):
+def get_main(request: Request):
     session_id = request.cookies.get("session_id")
-    users = None
-    if session_id and session_id in sessions:
-        session_data = sessions[session_id]
-        if isinstance(session_data, dict):
-            users = {
-                "username": session_data.get("username"),
-                "password_hash": session_data.get("password_hash", ""),
-                "password": session_data.get("username"),
-                "role": session_data.get("role", "user")
-            }
-    return templates.TemplateResponse("main.html", {"request": request, "user": users})
+    user = None
+    if session_id:
+        s = sessions.get(session_id)
+        if s:
+            user = {"username": s.get("username"), "role": s.get("role")}
+    return templates.TemplateResponse("main.html", {"request": request, "user": user})
+
 
 @app.get("/logout", response_class=HTMLResponse)
 def logout(request: Request):
     session_id = request.cookies.get("session_id")
     if session_id:
         sessions.pop(session_id, None)
-    return RedirectResponse(url="/login", status_code=303)
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie("session_id")
+    response.delete_cookie("username")
+    response.delete_cookie("role")
+    return response
 
-# @app.post("/")
-# async def redirect_after_update():
-#     return RedirectResponse(url="/login")
 
 @app.exception_handler(404)
 async def not_found(request: Request, exc):
@@ -191,5 +193,3 @@ async def not_found(request: Request, exc):
 @app.exception_handler(403)
 async def forbidden(request: Request, exc):
     return templates.TemplateResponse("403.html", {"request": request}, status_code=403)
-
-
